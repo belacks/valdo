@@ -1,3 +1,14 @@
+# Data Files (Do NOT commit real data)
+*.db
+*.db-shm
+*.db-wal
+*.xlsx
+*.csv
+
+# System
+.DS_Store
+
+# Virtual Envs & Python
 __pycache__/
 *.py[cod]
 .env
