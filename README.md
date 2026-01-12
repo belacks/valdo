@@ -1,4 +1,4 @@
-# Valdo Asset Manager
+# Asset Manager
 
 A lightweight, full-stack Asset Management System built with Streamlit, SQLite, and Docker.
 
