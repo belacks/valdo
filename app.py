@@ -7,19 +7,31 @@ Includes Smart Auto-Increment and Bulk Add features.
 """
 import streamlit as st
 import pandas as pd
+from datetime import datetime
 from helpers.db import AssetDatabase
 from helpers.utils import increment_string
 from helpers.exporter import AssetExporter
+from helpers.automation import SystemAutomation
 
 # Initialize database
 db = AssetDatabase("assets.db")
+
+# Initialize Automation (Singleton)
+automation = SystemAutomation()
+automation.start()
+
+# Check for Integrity Alerts
+scan_results = automation.get_latest_scan_results()
+
 # Initialize exporter
 exporter = AssetExporter("gabungan.xlsx")
 
-
-
 # Page config
-st.set_page_config(page_title="Asset Management", page_icon="📦", layout="wide")
+st.set_page_config(page_title="Valdo Asset Manager", layout="wide", page_icon="🏢")
+
+if scan_results["status"] == "warning":
+    with st.container():
+        st.warning(f"⚠️ **Data Integrity Alert**: Found {len(scan_results['detected_files'])} suspicious Excel file(s) in directory. Go to **Data Management** to resolve.", icon="⚠️")
 
 
 # === AUTHENTICATION ===
@@ -53,12 +65,23 @@ if not check_password():
 
 # Sidebar navigation
 st.sidebar.title("📦 Asset Management")
+
+# Backup Button
+with open("assets.db", "rb") as f:
+    st.sidebar.download_button(
+        label="💾 Backup Database (.db)",
+        data=f,
+        file_name=f"assets_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db",
+        mime="application/x-sqlite3"
+    )
+
 if st.sidebar.button("Logout"):
     st.session_state.authenticated = False
     st.rerun()
 
 st.sidebar.divider()
-page = st.sidebar.radio("Navigation", ["Asset Manager", "Data Import"])
+page = st.sidebar.radio("Navigation", ["Asset Manager", "Data Management", "🗑️ Recycle Bin"])
+
 
 # === DIALOG: Add Inventory (Smart Auto-Fill & Bulk Add) ===
 @st.dialog("➕ Add Inventory Item", width="large")
@@ -87,8 +110,7 @@ def add_inventory_dialog():
     if latest_item:
         if latest_item.get('kode'):
             next_kode = increment_string(latest_item.get('kode'))
-        if latest_item.get('serial_number'):
-            next_serial = increment_string(latest_item.get('serial_number'))
+        next_serial = latest_item.get('serial_number', '')  # Serial is static, not incremented
     
     if template:
         st.success("✅ **Auto-fill enabled!** Values from existing inventory will be used. IDs auto-incremented.")
@@ -190,8 +212,7 @@ def add_inventory_dialog():
                     # Smart increment for subsequent items (starts from the base for i=0)
                     if i > 0:
                         current_kode = increment_string(current_kode)
-                        if current_serial:
-                            current_serial = increment_string(current_serial)
+                        # Serial number is static - NOT incremented
                     
                     inventory_data = {
                         'Kode': current_kode,
@@ -422,13 +443,69 @@ if page == "Asset Manager":
     else:
         st.info("No master assets found. Import data first!")
 
-# === DATA IMPORT PAGE ===
-elif page == "Data Import":
-    st.header("📥 Import Data from Excel")
+# === DATA MANAGEMENT PAGE ===
+elif page == "Data Management":
+    st.header("🛠️ Data Management")
     
-    st.warning("⚠️ This will import data from gabungan.xlsx. Existing data will not be overwritten (duplicates ignored).")
+    # 1. Integrity Monitor
+    st.subheader("🔍 Integrity Monitor")
     
-    if st.button("🔄 Run Import", type="primary"):
+    scan_results = automation.get_latest_scan_results()
+    
+    if st.button("🔎 Run Manual Scan"):
+        with st.spinner("Scanning directory..."):
+            automation.scan_directory()
+            scan_results = automation.get_latest_scan_results()
+        st.rerun()
+
+    if scan_results["status"] == "warning":
+        st.error(f"Found {len(scan_results['detected_files'])} file(s) with differences.")
+        
+        for issue in scan_results['detected_files']:
+            new_count = len(issue.get('new_rows', []))
+            changed_count = len(issue.get('changed_rows', []))
+            missing_count = len(issue.get('missing_rows', []))
+            
+            with st.expander(f"📄 {issue['filename']} — 🆕 {new_count} New, ✏️ {changed_count} Changed, ❌ {missing_count} Missing"):
+                st.caption(issue['message'])
+                
+                # NEW ROWS TABLE
+                if issue.get('new_rows'):
+                    st.markdown("#### 🆕 New Items (In Excel, Not in Database)")
+                    df_new = pd.DataFrame(issue['new_rows'])
+                    st.dataframe(df_new, use_container_width=True, hide_index=True, height=300)
+                
+                # CHANGED ROWS TABLE
+                if issue.get('changed_rows'):
+                    st.markdown("#### ✏️ Modified Items (Values Differ)")
+                    df_changed = pd.DataFrame(issue['changed_rows'])
+                    st.dataframe(df_changed, use_container_width=True, hide_index=True, height=300)
+                
+                # MISSING ROWS TABLE
+                if issue.get('missing_rows'):
+                    st.markdown("#### ❌ Missing Items (In Database, Not in Excel)")
+                    df_missing = pd.DataFrame(issue['missing_rows'])
+                    st.dataframe(df_missing, use_container_width=True, hide_index=True, height=300)
+                
+                st.divider()
+                if st.button(f"📥 Import All from {issue['filename']}", key=f"imp_{issue['file']}"):
+                    with st.spinner(f"Importing {issue['file']}..."):
+                        stats = db.ingest_from_excel(issue['file'])
+                        st.success(f"Imported {stats['inventory_added']} items!")
+                        automation.scan_directory()
+                        st.rerun()
+    else:
+        st.success("✅ System Integrity Verified. No differences detected.")
+        if scan_results["last_scan"]:
+            st.caption(f"Last scan: {scan_results['last_scan']}")
+
+    st.divider()
+
+    # 2. Manual Import Section
+    st.subheader("📥 Manual Import")
+    st.write("Import data from the default `gabungan.xlsx` or other files.")
+    
+    if st.button("🔄 Import Default (gabungan.xlsx)", type="primary"):
         with st.spinner("Importing data..."):
             stats = db.ingest_from_excel("gabungan.xlsx")
         
@@ -443,3 +520,47 @@ elif page == "Data Import":
             with st.expander(f"⚠️ {len(stats['errors'])} Errors"):
                 for err in stats['errors'][:20]:
                     st.text(err)
+
+# === RECYCLE BIN PAGE ===
+elif page == "🗑️ Recycle Bin":
+    st.header("🗑️ Recycle Bin (Trash)")
+    
+    st.info("These items have been deleted but can still be restored.")
+    
+    deleted_items = db.get_deleted_inventory()
+    
+    if deleted_items:
+        df_deleted = pd.DataFrame(deleted_items)
+        
+        # Select important columns to show
+        cols_to_show = ['kode', 'nama_aset', 'serial_number', 'user', 'lokasi_aset', 'timestamp']
+        available_cols = [c for c in cols_to_show if c in df_deleted.columns]
+        
+        # Interactive Table
+        event = st.dataframe(
+            df_deleted[available_cols],
+            use_container_width=True,
+            hide_index=True,
+            on_select="rerun",
+            selection_mode="single-row",
+            height=400
+        )
+        
+        if event.selection and event.selection.rows:
+            selected_idx = event.selection.rows[0]
+            selected_kode = df_deleted.iloc[selected_idx]['kode']
+            
+            st.warning(f"Selected: {selected_kode}")
+            
+            col_restore, col_perm = st.columns(2)
+            with col_restore:
+                if st.button("♻️ Restore Item", use_container_width=True, type="primary"):
+                    if db.restore_inventory(selected_kode):
+                        st.success(f"Restored {selected_kode}!")
+                        st.rerun()
+            
+            with col_perm:
+                # Optional: Permanent delete implementation in future if needed
+                st.button("❌ Permanent Delete (Disabled)", disabled=True, use_container_width=True, help="Contact admin for hard delete")
+    else:
+        st.success("Your trash is empty! 🧹")

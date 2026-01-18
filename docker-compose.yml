@@ -1,21 +1,23 @@
-version: '3.8'
-
 services:
   asset-manager:
     build: .
     container_name: valdo-asset-manager
-    # Ports removed (internal only)
+    ports:
+      - "8501:8501"
     volumes:
       - ./assets.db:/app/assets.db
+      - ./data:/app/data
     restart: unless-stopped
 
-  nginx:
-    image: nginx:latest
-    container_name: valdo-nginx
+  ngrok:
+    image: ngrok/ngrok:latest
+    container_name: valdo-ngrok
+    # Command: Open HTTP tunnel to the 'asset-manager' service on port 8501
+    command: http asset-manager:8501
     ports:
-      - "80:80"
-    volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - "4040:4040" # Web Interface for inspection
+    environment:
+      # Optional: User can set this in .env or rely on anonymous (short session)
+      - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN:-}
     depends_on:
       - asset-manager
-    restart: unless-stopped

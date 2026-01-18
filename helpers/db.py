@@ -14,6 +14,19 @@ class AssetDatabase:
     def __init__(self, db_path: str = "assets.db"):
         self.db_path = db_path
         self.create_tables()
+        self.migrate_schema()
+
+    def migrate_schema(self):
+        """Perform schema migrations for existing databases."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            # Add is_deleted column to fact_inventory if it doesn't exist
+            try:
+                cursor.execute("ALTER TABLE fact_inventory ADD COLUMN is_deleted INTEGER DEFAULT 0")
+            except sqlite3.OperationalError:
+                # Column likely already exists
+                pass
+            conn.commit()
 
     @contextmanager
     def get_connection(self):
@@ -96,6 +109,7 @@ class AssetDatabase:
                     keterangan TEXT,
                     last_so_date TEXT,
                     timestamp TEXT,
+                    is_deleted INTEGER DEFAULT 0,
                     FOREIGN KEY (nama_aset) REFERENCES dim_assets(nama_aset)
                 )
             """)
@@ -145,7 +159,6 @@ class AssetDatabase:
     def get_latest_item(self, nama_aset: str) -> dict | None:
         """
         Get the item with the lexicographically largest 'Kode' to determine next ID.
-        This is crucial for auto-incrementing correctly (e.g. 0224 > 0124).
         """
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -193,8 +206,8 @@ class AssetDatabase:
                  jenis_aset, spesifikasi, os, quantity, harga_pembelian, pemilik_asset, unit, 
                  client, penyedia_aset, pemegang_aset, pic, user, lokasi_aset, area, status, 
                  sub_status, masa_berlaku, kerahasiaan, integritas, ketersediaan, nilai, 
-                 keterangan, last_so_date, timestamp)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 keterangan, last_so_date, timestamp, is_deleted)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
             """, (
                 data.get('Kode'), data.get('Serial Number'), data.get('Tanggal PO'),
                 data.get('Layanan'), data.get('Brand'), data.get('Nama Aset'),
@@ -211,23 +224,39 @@ class AssetDatabase:
             conn.commit()
 
     def get_all_inventory(self, search_term: str = None) -> list[dict]:
-        """Get all inventory items, optionally filtered by search term."""
+        """Get active inventory items (not deleted)."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             if search_term:
                 cursor.execute("""
                     SELECT * FROM fact_inventory
-                    WHERE kode LIKE ? OR nama_aset LIKE ? OR user LIKE ? OR client LIKE ?
+                    WHERE (is_deleted = 0 OR is_deleted IS NULL) AND
+                          (kode LIKE ? OR nama_aset LIKE ? OR user LIKE ? OR client LIKE ?)
                 """, (f"%{search_term}%", f"%{search_term}%", f"%{search_term}%", f"%{search_term}%"))
             else:
-                cursor.execute("SELECT * FROM fact_inventory")
+                cursor.execute("SELECT * FROM fact_inventory WHERE is_deleted = 0 OR is_deleted IS NULL")
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_deleted_inventory(self) -> list[dict]:
+        """Get soft-deleted inventory items."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM fact_inventory WHERE is_deleted = 1")
             return [dict(row) for row in cursor.fetchall()]
 
     def delete_inventory(self, kode: str) -> bool:
-        """Delete inventory item by kode (does not touch dim_assets)."""
+        """Soft delete inventory item."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("DELETE FROM fact_inventory WHERE kode = ?", (kode,))
+            cursor.execute("UPDATE fact_inventory SET is_deleted = 1 WHERE kode = ?", (kode,))
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def restore_inventory(self, kode: str) -> bool:
+        """Restore soft-deleted inventory item."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE fact_inventory SET is_deleted = 0 WHERE kode = ?", (kode,))
             conn.commit()
             return cursor.rowcount > 0
 
